@@ -97,8 +97,7 @@ def load_blend_parts(
     if len(part_list) == 0:
         img = np.zeros((h, w, 4), dtype=np.uint8)
         minx = miny = maxx = maxy = 0
-        rst['is_empty'] = True
-        rst['img'] = img
+        rst = {'is_empty': True, 'img': img}
     else:
         rst = img_alpha_blending(part_list, final_size=ann['final_size'], output_type='dict')
         rst['is_empty'] = False

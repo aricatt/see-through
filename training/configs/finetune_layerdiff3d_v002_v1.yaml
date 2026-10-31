@@ -1,0 +1,81 @@
+# See-through v0.0.2 → 用户数据集微调（LayerDiff 3D）
+# 基于官方 configs/test_layerdiff3d.yaml 适配：
+#   - pretrained 全部指向本地 v0.0.2 缓存（离线，无 animagine 下载）
+#   - 单卡 70bc、bf16、grad_accum 8、gradient_checkpointing
+#   - 数据 = 转换后的 l2d_bodysamples_v3（347 角色 / 官方 24 tag）
+#   - smoke 版：max_train_steps 20，关闭 validation/visualization 触发
+#   - 显存适配：target_size 1024（官方迭代训练用 1024）；mix_tag_groups 恢复官方 2 组（13/11，匹配模型 group_embedding_num=[13,11]）；PYTORCH_ALLOC_CONF=expandable_segments 控峰值
+seed: 42
+
+pretrained_model_name_or_path: /home/ari/seethru_train/models/hf/hub/models--layerdifforg--seethroughv0.0.2_layerdiff3d/snapshots/4477e6ce529bc6a141732e1a55a4932176db3b89
+pretrained_unet: /home/ari/seethru_train/models/hf/hub/models--layerdifforg--seethroughv0.0.2_layerdiff3d/snapshots/4477e6ce529bc6a141732e1a55a4932176db3b89/unet
+
+dataset_args:
+
+  src_list:
+    - sample_list: workspace/datasets/l2d_bodysamples_v3.txt
+      sample_rate: 8
+
+  mask_cond: false
+  random_flip: 0.5
+  random_pad_prob: 0.5
+  target_size: 1024
+  include_blend_cls: false
+  # pad_num_frames: 20
+  ngroup_iters: 1
+  pad_argb: false
+
+  tag_list: [
+    'head', 'front hair', 'back hair', 'headwear', 'face', 'irides', 'eyebrow', 'eyewhite', 'eyelash', 'eyewear', 'ears', 'earwear', 'nose', 'mouth',
+    'neck', 'neckwear', 'topwear', 'handwear', 'bottomwear', 'legwear', 'footwear',
+    'tail', 'wings', 'objects'
+  ]
+
+  mix_tag_groups:
+    - tags: ['front hair', 'back hair', 'head', 'neck', 'neckwear', 'topwear', 'handwear', 'bottomwear', 'legwear', 'footwear', 'tail', 'wings', 'objects']
+      random_tag_prob: 0.
+    - tags: ['headwear', 'face', 'irides', 'eyebrow', 'eyewhite', 'eyelash', 'eyewear', 'ears', 'earwear', 'nose', 'mouth']
+      random_tag_prob: 0.
+
+model_args:
+  in_channels: 8
+
+optimizer_args:
+  betas: [0.9, 0.999]
+  weight_decay: 0.01
+  eps: 1e-08
+
+lr_scheduler:
+  constant_with_warmup
+
+lr_warmup_steps: 100
+
+# smoke test：不触发 validation/visualization
+validation_steps: 100000
+checkpointing_steps: 1
+checkpoints_total_limit: 1
+visualization_steps: 100000
+train_batch_size: 1
+val_batch_size: 1
+mixed_precision: "bf16"
+
+report_to: tensorboard
+gradient_accumulation_steps: 4
+learning_rate: 4e-5
+
+use_8bit_adam: false
+# aarch64 无 xformers wheel；PyTorch 原生 SDPA 替代
+enable_xformers_memory_efficient_attention: false
+gradient_checkpointing: true
+
+
+max_train_steps: 3
+
+proportion_empty_prompts: 0.0
+vae_use_offset_prob: 0.25
+
+learnable_parameters: all
+
+guidance_scale: 1.0
+
+snr_gamma: 5.0

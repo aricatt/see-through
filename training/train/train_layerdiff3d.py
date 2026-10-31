@@ -506,11 +506,12 @@ def parse_args():
         args.merge_with(config)
 
     if args.output_dir is None:
+        _base_dir = osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))
         if args.config is not None:
-            args.output_dir = osp.join('workspace/training_output',
+            args.output_dir = osp.join(_base_dir, 'workspace/training_output',
                                        osp.splitext(osp.basename(args.config))[0])
         else: 
-            args.output_dir = osp.join('workspace/training_output', args.tracker_project_name)
+            args.output_dir = osp.join(_base_dir, 'workspace/training_output', args.tracker_project_name)
         
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -724,10 +725,9 @@ def main():
         set_seed(args.seed)
         seed_everything(args.seed)
 
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+    # Handle the repository creation (所有 rank 创建 output_dir，供分片保存使用)
+    if args.output_dir is not None:
+        os.makedirs(args.output_dir, exist_ok=True)
 
 
     initial_global_step = 0
@@ -999,15 +999,23 @@ def main():
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
+    # 自动检测最新 checkpoint（未显式指定时）
+    if not args.resume_from_checkpoint and os.path.isdir(args.output_dir):
+        _dirs = [d for d in os.listdir(args.output_dir) if d.startswith('checkpoint')]
+        if _dirs:
+            args.resume_from_checkpoint = 'latest'
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
         else:
             # Get the most recent checkpoint
-            dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1] if len(dirs) > 0 else None
+            if os.path.isdir(args.output_dir):
+                dirs = os.listdir(args.output_dir)
+                dirs = [d for d in dirs if d.startswith("checkpoint")]
+                dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+                path = dirs[-1] if len(dirs) > 0 else None
+            else:
+                path = None
 
         if path is None:
             accelerator.print(
@@ -1017,11 +1025,27 @@ def main():
             initial_global_step = 0
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(args.output_dir, path))
+            # 手工 FSDP SHARDED 分片加载：只恢复模型权重（跳过优化器状态，动量从零重建）
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            from torch.distributed.fsdp.api import StateDictType
+            fsdp_model = accelerator.unwrap_model(model)
+            FSDP.set_state_dict_type(fsdp_model, StateDictType.SHARDED_STATE_DICT)
+            shard_path = os.path.join(args.output_dir, path, f'model_shard_rank{accelerator.process_index}.pt')
+            if os.path.isfile(shard_path):
+                shard = torch.load(shard_path, map_location='cpu')
+                fsdp_model.load_state_dict(shard)
+                del shard
+                accelerator.print(f'  Loaded FSDP shard: {shard_path}')
+            else:
+                raise FileNotFoundError(f'FSDP shard not found: {shard_path}')
+            FSDP.set_state_dict_type(fsdp_model, StateDictType.FULL_STATE_DICT)
             global_step = int(path.split("-")[1])
 
             initial_global_step = global_step
             first_epoch = global_step // num_update_steps_per_epoch
+            # 恢复 lr_scheduler 步数（warmup 连续性）
+            for _ in range(initial_global_step):
+                lr_scheduler.step()
 
     else:
         initial_global_step = 0
@@ -1046,9 +1070,12 @@ def main():
             img_list = img_list.to(device=vae.device, dtype=torch.float32)
             if pad_argb:
                 img_list = pad_rgb_torch(img_list, return_format='argb')
-            batched_latent_list.append(
-                vae_encode(vae, trans_vae_encoder, img_list, use_offset=use_offset).to(dtype=dtype)
-            )
+            frame_latents = []
+            for i in range(img_list.shape[0]):
+                frame_latents.append(
+                    vae_encode(vae, trans_vae_encoder, img_list[i:i+1], use_offset=use_offset)
+                )
+            batched_latent_list.append(torch.cat(frame_latents, dim=0).to(dtype=dtype))
         return torch.stack(batched_latent_list)
 
     noise_generator = None
@@ -1074,10 +1101,13 @@ def main():
 
             with accelerator.accumulate(model):
                 vae_use_offset = random.random() < args.vae_use_offset_prob
+                torch.cuda.reset_peak_memory_stats()
 
                 img_latent = vae_encode_frames(vae, trans_vae_encoder, batch['img_list'], use_offset=vae_use_offset, pad_argb=not train_dataset.pad_argb, dtype=weight_dtype)
 
                 c_concat = vae_encode(vae, trans_vae_encoder, batch['cond_fullpage'], use_offset=vae_use_offset).to(dtype=weight_dtype)
+                m_encode = torch.cuda.max_memory_allocated() / 1024**3
+                m_reserved = torch.cuda.max_memory_reserved() / 1024**3
 
                 noise = torch.randn_like(img_latent)
                 if args.noise_offset:
@@ -1189,6 +1219,9 @@ def main():
 
                 # Backpropagate
                 accelerator.backward(loss)
+                m_step = torch.cuda.max_memory_allocated() / 1024**3
+                if global_step % 1 == 0 and accelerator.is_local_main_process:
+                    print(f'[mem-rank{accelerator.local_process_index}] encode_peak={m_encode:.1f}G reserved={m_reserved:.1f}G step_peak={m_step:.1f}G', flush=True)
                 if accelerator.sync_gradients:
                     params_to_clip = model.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
@@ -1213,13 +1246,17 @@ def main():
                 if len(last_lr) > 1:
                     loss_dict['lr_temporal'] = last_lr[1]
                 accelerator.log(loss_dict, step=global_step)
+                torch.cuda.empty_cache()  # periodic cache release after each optimizer step
                 loss_dict = {}
 
                 # DeepSpeed requires saving weights on every device; saving weights only on the main process would cause issues.
-                if accelerator.distributed_type == DistributedType.DEEPSPEED or accelerator.is_main_process:
+                # 分片保存：所有 rank 各存自己的分片（清理旧 checkpoint 仅主进程）
+                if True:
                     if global_step % args.checkpointing_steps == 0 or (global_step + 1) % args.checkpointing_steps == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
+                            if not os.path.isdir(args.output_dir):
+                                os.makedirs(args.output_dir, exist_ok=True)
                             checkpoints = os.listdir(args.output_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
@@ -1239,8 +1276,14 @@ def main():
                                     shutil.rmtree(removing_checkpoint)
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
+                        os.makedirs(save_path, exist_ok=True)
+                        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+                        from torch.distributed.fsdp.api import StateDictType
+                        fsdp_model = accelerator.unwrap_model(model)
+                        FSDP.set_state_dict_type(fsdp_model, StateDictType.SHARDED_STATE_DICT)
+                        shard = fsdp_model.state_dict()
+                        torch.save(shard, os.path.join(save_path, f"model_shard_rank{accelerator.process_index}.pt"))
+                        logger.info(f"Saved sharded model to {save_path}")
 
                 if accelerator.is_main_process:
                     if global_step % args.visualization_steps == 0:
