@@ -309,12 +309,15 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
         Image.fromarray(full).save(osp.join(saved, f'{tag}.png'))
 
 
-def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth):
+def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth, tag_list=None):
     """Run Marigold depth estimation. Matches inference_utils.apply_marigold logic.
 
     Uses resolution_depth to control Marigold inference resolution. If different from
     source image size, images are resized before depth prediction and depth maps are
     resized back after. All frames processed together (no chunking).
+
+    tag_list: v4 模式的 part tag 列表（unet config.tag_groups 展平，逐 tag 一图、
+    无组合层）。None -> v1-v3 旧 19 标签 + hair/eyes 组合逻辑（行为不变）。
     """
     srcname = osp.basename(osp.splitext(srcp)[0])
     saved = osp.join(save_dir, srcname)
@@ -334,8 +337,10 @@ def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth):
     empty_array = np.zeros((src_h, src_w, 4), dtype=np.uint8)
     blended_alpha = np.zeros((src_h, src_w), dtype=np.float32)
 
-    compose_list = {'eyes': ['eyewhite', 'irides', 'eyelash', 'eyebrow'], 'hair': ['back hair', 'front hair']}
-    for tag in VALID_BODY_PARTS_V2:
+    target_tags = tag_list if tag_list is not None else VALID_BODY_PARTS_V2
+    compose_list = {} if tag_list is not None else \
+        {'eyes': ['eyewhite', 'irides', 'eyelash', 'eyebrow'], 'hair': ['back hair', 'front hair']}
+    for tag in target_tags:
         tagp = osp.join(saved, f'{tag}.png')
         if osp.exists(tagp):
             exist_list.append(True)
@@ -397,7 +402,7 @@ def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth):
     parts = info['parts']
     for ii, depth in enumerate(depth_pred[:-1]):
         depth = (np.clip(depth, 0, 1) * 255).astype(np.uint8)
-        tag = VALID_BODY_PARTS_V2[ii]
+        tag = target_tags[ii]
         if tag in compose_dict:
             mask = blended_alpha > 256
             for t, im in zip(compose_dict[tag]['taglist'][::-1], compose_dict[tag]['imlist'][::-1]):
@@ -414,6 +419,8 @@ def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth):
                 parts[t] = parts_info
             continue
 
+        if not exist_list[ii]:
+            continue
         parts_info = parts.get(tag, {})
         Image.fromarray(depth).save(osp.join(saved, f'{tag}_depth.png'))
         parts[tag] = parts_info
@@ -497,6 +504,11 @@ if __name__ == '__main__':
     layerdiff_time = time.time() - layerdiff_t0
     print(f'  LayerDiff3D done in {layerdiff_time:.1f}s')
 
+    # v4：unet config.tag_groups 展平为 tag_list，供 Marigold/PSD 组装按新语义标签取层
+    tag_list = None
+    if pipeline.unet.get_tag_version() == 'v4':
+        tag_list = [t for g in pipeline.unet.config.get('tag_groups') for t in g]
+
     # Free layerdiff pipeline before loading marigold
     del pipeline
     torch.cuda.empty_cache()
@@ -507,7 +519,8 @@ if __name__ == '__main__':
 
     print('Running Marigold depth...')
     marigold_t0 = time.time()
-    run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth=args.resolution_depth)
+    run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth=args.resolution_depth,
+                 tag_list=tag_list)
     marigold_time = time.time() - marigold_t0
     print(f'  Marigold done in {marigold_time:.1f}s')
 

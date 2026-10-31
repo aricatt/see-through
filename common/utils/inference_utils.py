@@ -595,11 +595,13 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
             part_dict_list.append(part_dict)
 
     if 'face' in tag2pinfo:
-        for t in ['nose', 'mouth', 'eyes']:
+        for t in ['nose', 'mouth', 'eyes', 'eye_left', 'eye_right',
+                  'eyebrow_left', 'eyebrow_right']:
             if t in tag2pinfo:
                 if tag2pinfo[t]['depth_median'] > tag2pinfo['face']['depth_median']:
                     tag2pinfo[t]['depth_median'] = tag2pinfo['face']['depth_median'] - 0.001
-        for t in ['earr', 'earl', 'ears']:
+        for t in ['earr', 'earl', 'ears', 'ear_left', 'ear_right',
+                  'animal_ear_left', 'animal_ear_right']:
             if t in tag2pinfo:
                 tag2pinfo[t]['depth_median'] = tag2pinfo['face']['depth_median'] + 0.001
 
