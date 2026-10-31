@@ -518,7 +518,7 @@ class LayerDiffDataset3D(Dataset):
             empty_mask[tag_index] = False
             tgt_img_list[tag_index] = tag_img
 
-        if not footwear_exist and 'legwear' in caption_list:
+        if not footwear_exist and 'legwear' in caption_list and 'footwear' in target_tags:
             caption_list[caption_list.index('legwear')] = 'legwear,footwear'
 
         npad = self.pad_num_frames - len(caption_list)
