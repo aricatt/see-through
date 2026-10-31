@@ -133,6 +133,91 @@ def build_marigold_pipeline(args):
     return marigold_pipe
 
 
+def _run_layerdiff_v4(pipeline, imgp, save_dir, rng, num_inference_steps, resolution,
+                      input_img, fullpage, pad_size, pad_pos, scale, saved):
+    """v4：按 unet config.tag_groups 跑各组 pass；含 'face' 的组走 head-crop pass。"""
+    def _crop_head(img, xywh):
+        x, y, w, h = xywh
+        ih, iw = img.shape[:2]
+        x1 = x
+        y1 = y
+        x2 = x + w
+        y2 = y + h
+        if w < iw // 2:
+            px = min(iw - x - w, x, w // 5)
+            x1 = min(max(x - px, 0), iw)
+            x2 = min(max(x + w + px, 0), iw)
+        if h < ih // 2:
+            py = min(ih - y - h, y, h // 5)
+            y2 = min(max(y + h + py, 0), ih)
+            y1 = min(max(y - py, 0), ih)
+        return img[y1: y2, x1: x2], (x1, y1, x2, y2)
+
+    tag_groups = [list(g) for g in pipeline.unet.config.get('tag_groups')]
+    head_gidx = next((i for i, g in enumerate(tag_groups) if 'face' in g), len(tag_groups) - 1)
+
+    head_anchor_img = None
+    for gidx, tag_list in enumerate(tag_groups):
+        if gidx == head_gidx:
+            continue
+        pipeline_output = pipeline(
+            strength=1.0,
+            num_inference_steps=num_inference_steps,
+            batch_size=1,
+            generator=rng,
+            guidance_scale=1.0,
+            prompt=[t.replace('_', ' ') for t in tag_list],
+            negative_prompt='',
+            fullpage=fullpage,
+            group_index=gidx
+        )
+        for rst, tag in zip(pipeline_output.images, tag_list):
+            Image.fromarray(rst).save(osp.join(saved, f'{tag}.png'))
+        if 'head' in tag_list and head_anchor_img is None:
+            head_anchor_img = pipeline_output.images[tag_list.index('head')]
+
+    assert head_anchor_img is not None, \
+        "v4 推理需要某个非 head 组含 'head' anchor tag（用于 head-crop 定位）"
+
+    hx0, hy0, hw, hh = cv2.boundingRect(cv2.findNonZero((head_anchor_img[..., -1] > 15).astype(np.uint8)))
+
+    hx = int(hx0 * scale) - pad_pos[0]
+    hy = int(hy0 * scale) - pad_pos[1]
+    hw = int(hw * scale)
+    hh = int(hh * scale)
+
+    input_head, (hx1, hy1, hx2, hy2) = _crop_head(input_img, [hx, hy, hw, hh])
+    hx1 = int(hx1 / scale + pad_pos[0] / scale)
+    hy1 = int(hy1 / scale + pad_pos[1] / scale)
+    ih, iw = input_head.shape[:2]
+    input_head, pad_size, pad_pos = center_square_pad_resize(input_head, resolution, return_pad_info=True)
+    Image.fromarray(input_head).save(osp.join(saved, 'src_head.png'))
+
+    head_tag_list = tag_groups[head_gidx]
+    pipeline_output = pipeline(
+        strength=1.0,
+        num_inference_steps=num_inference_steps,
+        batch_size=1,
+        generator=rng,
+        guidance_scale=1.0,
+        prompt=[t.replace('_', ' ') for t in head_tag_list],
+        negative_prompt='',
+        fullpage=input_head,
+        group_index=head_gidx
+    )
+    canvas = np.zeros((resolution, resolution, 4), dtype=np.uint8)
+
+    py1, py2, px1, px2 = (np.array([pad_pos[1], pad_pos[1] + ih, pad_pos[0], pad_pos[0] + iw]) / scale).astype(np.int64)
+
+    scale_size = (int(pad_size[0] / scale), int(pad_size[1] / scale))
+
+    for rst, tag in zip(pipeline_output.images, head_tag_list):
+        rst = smart_resize(rst, scale_size)[py1: py2, px1: px2]
+        full = canvas.copy()
+        full[hy1: hy1 + rst.shape[0], hx1: hx1 + rst.shape[1]] = rst
+        Image.fromarray(full).save(osp.join(saved, f'{tag}.png'))
+
+
 def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolution):
     """Run LayerDiff3D body + head passes. Replicates inference_utils.py v3 logic exactly."""
     saved = osp.join(save_dir, osp.splitext(osp.basename(imgp))[0])
@@ -143,6 +228,10 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
     Image.fromarray(fullpage).save(osp.join(saved, 'src_img.png'))
 
     rng = torch.Generator(device=pipeline.unet.device).manual_seed(seed)
+
+    if pipeline.unet.get_tag_version() == 'v4':
+        return _run_layerdiff_v4(pipeline, imgp, save_dir, rng, num_inference_steps,
+                                 resolution, input_img, fullpage, pad_size, pad_pos, scale, saved)
 
     # Body pass
     body_tag_list = ['front hair', 'back hair', 'head', 'neck', 'neckwear', 'topwear', 'handwear', 'bottomwear', 'legwear', 'footwear', 'tail', 'wings', 'objects']

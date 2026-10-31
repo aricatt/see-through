@@ -818,7 +818,7 @@ def main():
     model = UNetFrameConditionModel.from_pretrained(
         args.pretrained_unet
     )
-    model.init_weights()
+    model.init_weights(zero_group_embeds=args.get('zero_init_group_embeds', True))
 
     # Freeze vae and text encoders.
     vae.requires_grad_(False)

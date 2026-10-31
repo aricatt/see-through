@@ -1,0 +1,100 @@
+# See-through v0.0.2 → 44 语义标签微调（LayerDiff 3D, tag_version=v4）
+# 基于 finetune_layerdiff3d_v002_v1.yaml 适配：
+#   - pretrained_unet 指向离线扩维产物 unet_group44（group_embedding_num=[30,15]，tag_version=v4）
+#   - mix_tag_groups 换 44+1 tag 双组（body 30 / head 15，组内顺序与扩维 params 行序逐位一致）
+#   - src_list 指向 prepare_dataset_44.py 产出的 l2d_bodysamples_44.txt
+#   - zero_init_group_embeds: false —— 保留扩维时从 v0.0.2 继承的 group linear（44 微调专用）
+#   - smoke 态交付：max_train_steps 3 / checkpoints_total_limit 1（正式训练前手动调 50/6）
+#   - train_batch_size 必须 1（group params broadcast 约束）；pad_num_frames 不可设置
+seed: 42
+
+pretrained_model_name_or_path: /home/ari/seethru_train/models/hf/hub/models--layerdifforg--seethroughv0.0.2_layerdiff3d/snapshots/4477e6ce529bc6a141732e1a55a4932176db3b89
+pretrained_unet: /home/ari/seethru_train/models/unet_group44
+
+dataset_args:
+
+  src_list:
+    - sample_list: workspace/datasets/l2d_bodysamples_44.txt
+      sample_rate: 8
+
+  mask_cond: false
+  random_flip: 0.5
+  random_pad_prob: 0.5
+  target_size: 1024
+  include_blend_cls: false
+  # pad_num_frames: 20  # 严禁设置：padding 会撑大 num_frames 破坏 params broadcast
+  ngroup_iters: 1
+  pad_argb: false
+
+  tag_list: [
+    'hair_back', 'hair_front', 'hair_bangs', 'hair_side_left', 'hair_side_right',
+    'head', 'neck', 'neckwear', 'ribbon', 'topwear', 'dress', 'cloak',
+    'sleeve_left', 'sleeve_right', 'hand_left', 'hand_right', 'glove_left', 'glove_right',
+    'weapon', 'accessory', 'skirt', 'bottomwear', 'legwear', 'leg_left', 'leg_right',
+    'footwear_left', 'footwear_right', 'tail', 'wing_left', 'wing_right',
+    'face', 'eye_left', 'eye_right', 'eyebrow_left', 'eyebrow_right',
+    'nose', 'mouth', 'ear_left', 'ear_right', 'animal_ear_left', 'animal_ear_right',
+    'eyewear', 'hat', 'headwear', 'hair_ornament'
+  ]
+
+  mix_tag_groups:
+    - tags: [
+        'hair_back', 'hair_front', 'hair_bangs', 'hair_side_left', 'hair_side_right',
+        'head', 'neck', 'neckwear', 'ribbon', 'topwear', 'dress', 'cloak',
+        'sleeve_left', 'sleeve_right', 'hand_left', 'hand_right', 'glove_left', 'glove_right',
+        'weapon', 'accessory', 'skirt', 'bottomwear', 'legwear', 'leg_left', 'leg_right',
+        'footwear_left', 'footwear_right', 'tail', 'wing_left', 'wing_right'
+      ]
+      random_tag_prob: 0.
+    - tags: [
+        'face', 'eye_left', 'eye_right', 'eyebrow_left', 'eyebrow_right',
+        'nose', 'mouth', 'ear_left', 'ear_right', 'animal_ear_left', 'animal_ear_right',
+        'eyewear', 'hat', 'headwear', 'hair_ornament'
+      ]
+      random_tag_prob: 0.
+
+model_args:
+  in_channels: 8
+
+optimizer_args:
+  betas: [0.9, 0.999]
+  weight_decay: 0.01
+  eps: 1e-08
+
+lr_scheduler:
+  constant_with_warmup
+
+lr_warmup_steps: 100
+
+# 保留扩维继承的 group linear（44 微调必须 false）
+zero_init_group_embeds: false
+
+# smoke test：不触发 validation/visualization
+validation_steps: 100000
+checkpointing_steps: 1
+checkpoints_total_limit: 1
+visualization_steps: 100000
+train_batch_size: 1
+val_batch_size: 1
+mixed_precision: "bf16"
+
+report_to: tensorboard
+gradient_accumulation_steps: 4
+learning_rate: 4e-5
+
+use_8bit_adam: false
+# aarch64 无 xformers wheel；PyTorch 原生 SDPA 替代
+enable_xformers_memory_efficient_attention: false
+gradient_checkpointing: true
+
+
+max_train_steps: 3
+
+proportion_empty_prompts: 0.0
+vae_use_offset_prob: 0.25
+
+learnable_parameters: all
+
+guidance_scale: 1.0
+
+snr_gamma: 5.0

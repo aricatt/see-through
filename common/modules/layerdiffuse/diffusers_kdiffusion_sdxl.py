@@ -241,7 +241,15 @@ class KDiffusionStableDiffusionXLPipeline(StableDiffusionXLImg2ImgPipeline):
 
     def cache_tag_embeds(self, unload_textencoders=True):
         tag_version = self.unet.get_tag_version()
-        if tag_version == 'v3' and len(self._cached_prompt_embeds) == 0:
+        if tag_version == 'v4' and len(self._cached_prompt_embeds) == 0:
+            # v4：组列表来自 unet config（扩维 ckpt 写入），tag 名归一化为空格 caption
+            tag_groups = self.unet.config.get('tag_groups')
+            assert tag_groups is not None, "tag_version=v4 但 unet config 缺 tag_groups"
+            all_tags = [t.replace('_', ' ') for g in tag_groups for t in g]
+            prompt_embeds, pooled_prompt_embeds = self.encode_cropped_prompt_77tokens(all_tags)
+            for ii in range(len(all_tags)):
+                self._cached_prompt_embeds[all_tags[ii]] = [prompt_embeds[[ii]].cpu(), pooled_prompt_embeds[[ii]].cpu()]
+        elif tag_version == 'v3' and len(self._cached_prompt_embeds) == 0:
             body_tag_list = ['front hair', 'back hair', 'head', 'neck', 'neckwear', 'topwear', 'handwear', 'bottomwear', 'legwear', 'footwear', 'tail', 'wings', 'objects']
             head_tag_list = ['headwear', 'face', 'irides', 'eyebrow', 'eyewhite', 'eyelash', 'eyewear', 'ears', 'earwear', 'nose', 'mouth']
             prompt_embeds, pooled_prompt_embeds = self.encode_cropped_prompt_77tokens(body_tag_list)

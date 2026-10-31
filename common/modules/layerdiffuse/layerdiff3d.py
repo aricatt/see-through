@@ -993,11 +993,11 @@ class UNetFrameConditionModel(
     def get_tag_version(self):
         return self.config.get('tag_version', None)
 
-    def init_weights(self):
+    def init_weights(self, zero_group_embeds: bool = True):
         for name, module in self.named_modules():
             if '.temporal_transformer_blocks.' in name and '.ff.net.2' in name:
                 zero_module(module)
-        if self.config.group_embedding:
+        if zero_group_embeds and self.config.group_embedding:
             for e in self.group_embeds:
                 e.linear = zero_module(e.linear)
             for e in self.group_embeds2:

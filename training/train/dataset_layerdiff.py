@@ -506,7 +506,7 @@ class LayerDiffDataset3D(Dataset):
             return img
 
         tgt_img_list = [empty_tensor] * len(target_tags)
-        caption_list = target_tags
+        caption_list = [t.replace('_', ' ') for t in target_tags]
         empty_mask = [True] * len(target_tags)
 
         footwear_exist = False
