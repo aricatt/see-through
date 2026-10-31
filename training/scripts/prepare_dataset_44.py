@@ -161,7 +161,9 @@ def main():
             lines.append(f"{args.list_rel_dir}/{prefix}.png")
         else:
             skipped.append(fp.name)
-    Path(args.list_path).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    # 不写尾部换行：load_sample_list 会把末尾空行解析成一个 img='' 的脏样本，
+    # 采样命中即 __getitem__ 崩溃（Dataset3D 不容错重抽）
+    Path(args.list_path).write_text('\n'.join(lines), encoding='utf-8')
 
     # 收尾校验：输出目录里每个部件 png 必须有配对 _depth.png
     bad = [p.name for p in out_dir.glob('*_fullbody_*.png')
