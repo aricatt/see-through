@@ -48,12 +48,12 @@ if __name__ == '__main__':
         seed_everything(args.seed)
 
         print('running layerdiff...')
-        apply_layerdiff(srcp, args.repo_id_layerdiff, save_dir=args.save_dir, seed=args.seed, vae_ckpt=args.vae_ckpt, unet_ckpt=args.unet_ckpt, \
+        tag_list = apply_layerdiff(srcp, args.repo_id_layerdiff, save_dir=args.save_dir, seed=args.seed, vae_ckpt=args.vae_ckpt, unet_ckpt=args.unet_ckpt, \
             resolution=args.resolution, disable_progressbar=args.disable_progressbar, num_inference_steps=args.inference_steps, group_offload=args.group_offload)
 
         print('running marigold...')
         apply_marigold(srcp, args.repo_id_depth, save_dir=args.save_dir, seed=args.seed, disable_progressbar=args.disable_progressbar, \
-            resolution=args.resolution_depth, num_inference_steps=args.inference_steps_depth, group_offload=args.group_offload)
+            resolution=args.resolution_depth, num_inference_steps=args.inference_steps_depth, group_offload=args.group_offload, target_tag_list=tag_list)
 
         srcname = osp.basename(osp.splitext(srcp)[0])
         saved = osp.join(args.save_dir, srcname)

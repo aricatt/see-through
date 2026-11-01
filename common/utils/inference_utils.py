@@ -252,7 +252,9 @@ def apply_layerdiff(
     else:
         raise
 
-
+    if tag_version == 'v4':
+        return [t for g in pipeline.unet.config.get('tag_groups') for t in g]
+    return None
 
 
 marigold_pipeline: MarigoldDepthPipeline = None
@@ -289,8 +291,9 @@ def apply_marigold(srcp, pretrained: str, num_inference_steps=-1, seed=0, save_d
     empty_array = np.zeros((src_h, src_w, 4), dtype=np.uint8)
     blended_alpha = np.zeros((src_h, src_w), dtype=np.float32)
 
+    tag_list = target_tag_list if target_tag_list is not None else VALID_BODY_PARTS_V2
     compose_list = {'eyes': ['eyewhite', 'irides', 'eyelash', 'eyebrow'], 'hair': ['back hair', 'front hair']}
-    for tag in VALID_BODY_PARTS_V2:
+    for tag in tag_list:
         tagp = osp.join(saved, f'{tag}.png')
         if osp.exists(tagp):
             exist_list.append(True)
@@ -305,6 +308,8 @@ def apply_marigold(srcp, pretrained: str, num_inference_steps=-1, seed=0, save_d
 
     compose_dict = {}
     for c, clist in compose_list.items():
+        if c not in tag_list:
+            continue
         imlist = []
         taglist = []
         for tag in clist:
@@ -316,7 +321,7 @@ def apply_marigold(srcp, pretrained: str, num_inference_steps=-1, seed=0, save_d
                 taglist.append(tag)
         if len(imlist) > 0:
             img = img_alpha_blending(imlist, premultiplied=False)
-            img_list[VALID_BODY_PARTS_V2.index(c)] = img
+            img_list[tag_list.index(c)] = img
             compose_dict[c] = {'taglist': taglist, 'imlist': imlist}
 
     for img in img_list:
@@ -361,7 +366,7 @@ def apply_marigold(srcp, pretrained: str, num_inference_steps=-1, seed=0, save_d
         else:
             depth = (np.clip(depth, 0, 1) * 255).astype(np.uint8)
         # depth = depth[..., None][..., [-1] * 3].copy()
-        tag = VALID_BODY_PARTS_V2[ii]
+        tag = tag_list[ii]
         if tag in compose_dict:
             mask = blended_alpha > 256
             for t, im in zip(compose_dict[tag]['taglist'][::-1], compose_dict[tag]['imlist'][::-1]):

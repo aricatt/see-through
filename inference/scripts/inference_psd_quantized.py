@@ -33,15 +33,8 @@ from modules.marigold import MarigoldDepthPipeline
 from utils.cv import center_square_pad_resize, smart_resize, img_alpha_blending
 from utils.torch_utils import seed_everything
 from utils.io_utils import json2dict, dict2json
-from utils.inference_utils import further_extr
+from utils.inference_utils import further_extr, VALID_BODY_PARTS_V2
 from utils.cv import validate_resolution
-
-
-VALID_BODY_PARTS_V2 = [
-    'hair', 'headwear', 'face', 'eyes', 'eyewear', 'ears', 'earwear', 'nose', 'mouth',
-    'neck', 'neckwear', 'topwear', 'handwear', 'bottomwear', 'legwear', 'footwear',
-    'tail', 'wings', 'objects'
-]
 
 
 def build_layerdiff_pipeline(args):
@@ -364,7 +357,7 @@ def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth, tag_list
                 taglist.append(tag)
         if len(imlist) > 0:
             img = img_alpha_blending(imlist, premultiplied=False)
-            img_list[VALID_BODY_PARTS_V2.index(c)] = img
+            img_list[target_tags.index(c)] = img
             compose_dict[c] = {'taglist': taglist, 'imlist': imlist}
 
     for img in img_list:
