@@ -1025,19 +1025,35 @@ def main():
             initial_global_step = 0
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            # 手工 FSDP SHARDED 分片加载：只恢复模型权重（跳过优化器状态，动量从零重建）
+            # 手工 FSDP SHARDED 分片加载：恢复模型权重 + 优化器状态（动量/二阶矩续训）
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-            from torch.distributed.fsdp.api import StateDictType
+            from torch.distributed.fsdp.api import StateDictType, ShardedOptimStateDictConfig
             fsdp_model = accelerator.unwrap_model(model)
-            FSDP.set_state_dict_type(fsdp_model, StateDictType.SHARDED_STATE_DICT)
+            FSDP.set_state_dict_type(
+                fsdp_model,
+                StateDictType.SHARDED_STATE_DICT,
+                optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
+            )
             shard_path = os.path.join(args.output_dir, path, f'model_shard_rank{accelerator.process_index}.pt')
             if os.path.isfile(shard_path):
                 shard = torch.load(shard_path, map_location='cpu')
                 fsdp_model.load_state_dict(shard)
                 del shard
+                gc.collect()
                 accelerator.print(f'  Loaded FSDP shard: {shard_path}')
             else:
                 raise FileNotFoundError(f'FSDP shard not found: {shard_path}')
+            optim_shard_path = os.path.join(args.output_dir, path, f'optim_shard_rank{accelerator.process_index}.pt')
+            raw_optimizer = getattr(optimizer, 'optimizer', optimizer)
+            if os.path.isfile(optim_shard_path):
+                optim_shard = torch.load(optim_shard_path, map_location='cpu')
+                optim_state = FSDP.optim_state_dict_to_load(fsdp_model, raw_optimizer, optim_shard)
+                raw_optimizer.load_state_dict(optim_state)
+                del optim_shard, optim_state
+                gc.collect()
+                accelerator.print(f'  Loaded FSDP optimizer shard: {optim_shard_path}')
+            else:
+                accelerator.print(f'  WARNING: no optimizer shard in {path}, optimizer state starts from zero')
             FSDP.set_state_dict_type(fsdp_model, StateDictType.FULL_STATE_DICT)
             global_step = int(path.split("-")[1])
 
@@ -1250,9 +1266,9 @@ def main():
                 loss_dict = {}
 
                 # DeepSpeed requires saving weights on every device; saving weights only on the main process would cause issues.
-                # 分片保存：所有 rank 各存自己的分片（清理旧 checkpoint 仅主进程）
+                # 分片保存：所有 rank 各存自己的分片；每个 rank 清理自己磁盘上超额的 checkpoint
                 if True:
-                    if global_step % args.checkpointing_steps == 0 or (global_step + 1) % args.checkpointing_steps == 0:
+                    if global_step % args.checkpointing_steps == 0 or global_step == args.max_train_steps:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
                             if not os.path.isdir(args.output_dir):
@@ -1262,7 +1278,7 @@ def main():
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
                             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit and accelerator.is_main_process:
+                            if len(checkpoints) >= args.checkpoints_total_limit:
                                 num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
                                 removing_checkpoints = checkpoints[0:num_to_remove]
 
@@ -1273,17 +1289,31 @@ def main():
 
                                 for removing_checkpoint in removing_checkpoints:
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
+                                    if os.path.isdir(removing_checkpoint):
+                                        shutil.rmtree(removing_checkpoint)
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         os.makedirs(save_path, exist_ok=True)
                         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-                        from torch.distributed.fsdp.api import StateDictType
+                        from torch.distributed.fsdp.api import StateDictType, ShardedOptimStateDictConfig
                         fsdp_model = accelerator.unwrap_model(model)
-                        FSDP.set_state_dict_type(fsdp_model, StateDictType.SHARDED_STATE_DICT)
+                        raw_optimizer = getattr(optimizer, 'optimizer', optimizer)
+                        FSDP.set_state_dict_type(
+                            fsdp_model,
+                            StateDictType.SHARDED_STATE_DICT,
+                            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
+                        )
+                        # 模型分片与优化器分片分开写盘并及时释放，压低保存瞬间 host 内存峰值
                         shard = fsdp_model.state_dict()
                         torch.save(shard, os.path.join(save_path, f"model_shard_rank{accelerator.process_index}.pt"))
-                        logger.info(f"Saved sharded model to {save_path}")
+                        del shard
+                        gc.collect()
+                        optim_shard = FSDP.optim_state_dict(fsdp_model, raw_optimizer)
+                        torch.save(optim_shard, os.path.join(save_path, f"optim_shard_rank{accelerator.process_index}.pt"))
+                        del optim_shard
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        logger.info(f"Saved sharded model+optimizer to {save_path}")
 
                 if accelerator.is_main_process:
                     if global_step % args.visualization_steps == 0:
