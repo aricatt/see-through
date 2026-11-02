@@ -1038,12 +1038,6 @@ def main():
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
             from torch.distributed.fsdp.api import StateDictType, ShardedOptimStateDictConfig
             fsdp_model = accelerator.unwrap_model(model)
-            # FSDP.optim_state_dict* 需要真正的 FSDP 根 module（unwrap 后的内部 module 不含 FSDP 状态）
-            FSDP.set_state_dict_type(
-                model,
-                StateDictType.SHARDED_STATE_DICT,
-                optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
-            )
             shard_path = os.path.join(args.output_dir, path, f'model_shard_rank{accelerator.process_index}.pt')
             if os.path.isfile(shard_path):
                 shard = torch.load(shard_path, map_location='cpu', weights_only=False, mmap=True)
@@ -1057,15 +1051,26 @@ def main():
             raw_optimizer = getattr(optimizer, 'optimizer', optimizer)
             if os.path.isfile(optim_shard_path):
                 optim_shard = torch.load(optim_shard_path, map_location='cpu', weights_only=False, mmap=True)
-                optim_state = FSDP.optim_state_dict_to_load(model, raw_optimizer, optim_shard)
-                del optim_shard
-                raw_optimizer.load_state_dict(optim_state)
-                del optim_state
+                if any(isinstance(k, int) for k in optim_shard.get('state', {})):
+                    # 直接逐 rank 格式（optimizer.state_dict 原样存取，零 transform）
+                    raw_optimizer.load_state_dict(optim_shard)
+                    del optim_shard
+                else:
+                    # 兼容旧 FSDP 分片格式（state 以 FQN 字符串为键）
+                    FSDP.set_state_dict_type(
+                        model,
+                        StateDictType.SHARDED_STATE_DICT,
+                        optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
+                    )
+                    optim_state = FSDP.optim_state_dict_to_load(model, raw_optimizer, optim_shard)
+                    del optim_shard
+                    raw_optimizer.load_state_dict(optim_state)
+                    del optim_state
+                    FSDP.set_state_dict_type(model, StateDictType.FULL_STATE_DICT)
                 trim_host_memory()
-                accelerator.print(f'  Loaded FSDP optimizer shard: {optim_shard_path}')
+                accelerator.print(f'  Loaded optimizer shard: {optim_shard_path}')
             else:
                 accelerator.print(f'  WARNING: no optimizer shard in {path}, optimizer state starts from zero')
-            FSDP.set_state_dict_type(model, StateDictType.FULL_STATE_DICT)
             global_step = int(path.split("-")[1])
 
             initial_global_step = global_step
@@ -1305,24 +1310,17 @@ def main():
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         os.makedirs(save_path, exist_ok=True)
-                        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-                        from torch.distributed.fsdp.api import StateDictType, ShardedOptimStateDictConfig
                         fsdp_model = accelerator.unwrap_model(model)
                         raw_optimizer = getattr(optimizer, 'optimizer', optimizer)
-                        # unwrap 后的是内部 module；FSDP.*state_dict* API 必须作用于 FSDP 根 module（即 model 本身）
-                        FSDP.set_state_dict_type(
-                            model,
-                            StateDictType.SHARDED_STATE_DICT,
-                            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
-                        )
                         # 模型分片与优化器分片分开写盘并及时释放，压低保存瞬间 host 内存峰值
                         shard = fsdp_model.state_dict()
                         torch.save(shard, os.path.join(save_path, f"model_shard_rank{accelerator.process_index}.pt"))
                         del shard
                         trim_host_memory()
-                        optim_shard = FSDP.optim_state_dict(model, raw_optimizer)
-                        torch.save(optim_shard, os.path.join(save_path, f"optim_shard_rank{accelerator.process_index}.pt"))
-                        del optim_shard
+                        # 每 rank 的 optimizer 本就是本分片视角，state_dict 原样存取即可（无整体 CPU 拷贝）
+                        optim_state = raw_optimizer.state_dict()
+                        torch.save(optim_state, os.path.join(save_path, f"optim_shard_rank{accelerator.process_index}.pt"))
+                        del optim_state
                         trim_host_memory()
                         torch.cuda.empty_cache()
                         logger.info(f"Saved sharded model+optimizer to {save_path}")
