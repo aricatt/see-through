@@ -959,6 +959,15 @@ def main():
         model = model._orig_mod if is_compiled_module(model) else model
         return model
 
+    # 归还已释放的 host 内存给 OS（glibc arena 不自动回收，RSS 高水位会顶爆 earlyoom）
+    def trim_host_memory():
+        gc.collect()
+        try:
+            import ctypes
+            ctypes.CDLL('libc.so.6').malloc_trim(0)
+        except Exception:
+            pass
+
     if accelerator.is_main_process:
         dcfg = OmegaConf.to_container(args)
         tracker_init_kwargs = dcfg['tracker_init_kwargs']
@@ -1037,21 +1046,22 @@ def main():
             )
             shard_path = os.path.join(args.output_dir, path, f'model_shard_rank{accelerator.process_index}.pt')
             if os.path.isfile(shard_path):
-                shard = torch.load(shard_path, map_location='cpu', weights_only=False)
+                shard = torch.load(shard_path, map_location='cpu', weights_only=False, mmap=True)
                 fsdp_model.load_state_dict(shard)
                 del shard
-                gc.collect()
+                trim_host_memory()
                 accelerator.print(f'  Loaded FSDP shard: {shard_path}')
             else:
                 raise FileNotFoundError(f'FSDP shard not found: {shard_path}')
             optim_shard_path = os.path.join(args.output_dir, path, f'optim_shard_rank{accelerator.process_index}.pt')
             raw_optimizer = getattr(optimizer, 'optimizer', optimizer)
             if os.path.isfile(optim_shard_path):
-                optim_shard = torch.load(optim_shard_path, map_location='cpu', weights_only=False)
+                optim_shard = torch.load(optim_shard_path, map_location='cpu', weights_only=False, mmap=True)
                 optim_state = FSDP.optim_state_dict_to_load(model, raw_optimizer, optim_shard)
+                del optim_shard
                 raw_optimizer.load_state_dict(optim_state)
-                del optim_shard, optim_state
-                gc.collect()
+                del optim_state
+                trim_host_memory()
                 accelerator.print(f'  Loaded FSDP optimizer shard: {optim_shard_path}')
             else:
                 accelerator.print(f'  WARNING: no optimizer shard in {path}, optimizer state starts from zero')
@@ -1309,11 +1319,11 @@ def main():
                         shard = fsdp_model.state_dict()
                         torch.save(shard, os.path.join(save_path, f"model_shard_rank{accelerator.process_index}.pt"))
                         del shard
-                        gc.collect()
+                        trim_host_memory()
                         optim_shard = FSDP.optim_state_dict(model, raw_optimizer)
                         torch.save(optim_shard, os.path.join(save_path, f"optim_shard_rank{accelerator.process_index}.pt"))
                         del optim_shard
-                        gc.collect()
+                        trim_host_memory()
                         torch.cuda.empty_cache()
                         logger.info(f"Saved sharded model+optimizer to {save_path}")
 
