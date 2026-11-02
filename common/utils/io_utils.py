@@ -188,7 +188,7 @@ def load_exec_list(exec_list, rank=None, world_size=None, check_exist=False, to_
                 exec_list = json2dict(exec_list)
             elif exec_list.endswith('.txt'):
                 with open(exec_list, 'r', encoding='utf8') as f:
-                    exec_list = f.read().split('\n')
+                    exec_list = [l.strip() for l in f.read().split('\n') if l.strip()]
             else:
                 exec_list = [exec_list]
         else:
