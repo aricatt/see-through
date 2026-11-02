@@ -1029,8 +1029,9 @@ def main():
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
             from torch.distributed.fsdp.api import StateDictType, ShardedOptimStateDictConfig
             fsdp_model = accelerator.unwrap_model(model)
+            # FSDP.optim_state_dict* 需要真正的 FSDP 根 module（unwrap 后的内部 module 不含 FSDP 状态）
             FSDP.set_state_dict_type(
-                fsdp_model,
+                model,
                 StateDictType.SHARDED_STATE_DICT,
                 optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
             )
@@ -1047,14 +1048,14 @@ def main():
             raw_optimizer = getattr(optimizer, 'optimizer', optimizer)
             if os.path.isfile(optim_shard_path):
                 optim_shard = torch.load(optim_shard_path, map_location='cpu')
-                optim_state = FSDP.optim_state_dict_to_load(fsdp_model, raw_optimizer, optim_shard)
+                optim_state = FSDP.optim_state_dict_to_load(model, raw_optimizer, optim_shard)
                 raw_optimizer.load_state_dict(optim_state)
                 del optim_shard, optim_state
                 gc.collect()
                 accelerator.print(f'  Loaded FSDP optimizer shard: {optim_shard_path}')
             else:
                 accelerator.print(f'  WARNING: no optimizer shard in {path}, optimizer state starts from zero')
-            FSDP.set_state_dict_type(fsdp_model, StateDictType.FULL_STATE_DICT)
+            FSDP.set_state_dict_type(model, StateDictType.FULL_STATE_DICT)
             global_step = int(path.split("-")[1])
 
             initial_global_step = global_step
@@ -1298,8 +1299,9 @@ def main():
                         from torch.distributed.fsdp.api import StateDictType, ShardedOptimStateDictConfig
                         fsdp_model = accelerator.unwrap_model(model)
                         raw_optimizer = getattr(optimizer, 'optimizer', optimizer)
+                        # unwrap 后的是内部 module；FSDP.*state_dict* API 必须作用于 FSDP 根 module（即 model 本身）
                         FSDP.set_state_dict_type(
-                            fsdp_model,
+                            model,
                             StateDictType.SHARDED_STATE_DICT,
                             optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
                         )
@@ -1308,7 +1310,7 @@ def main():
                         torch.save(shard, os.path.join(save_path, f"model_shard_rank{accelerator.process_index}.pt"))
                         del shard
                         gc.collect()
-                        optim_shard = FSDP.optim_state_dict(fsdp_model, raw_optimizer)
+                        optim_shard = FSDP.optim_state_dict(model, raw_optimizer)
                         torch.save(optim_shard, os.path.join(save_path, f"optim_shard_rank{accelerator.process_index}.pt"))
                         del optim_shard
                         gc.collect()
