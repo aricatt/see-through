@@ -1037,7 +1037,7 @@ def main():
             )
             shard_path = os.path.join(args.output_dir, path, f'model_shard_rank{accelerator.process_index}.pt')
             if os.path.isfile(shard_path):
-                shard = torch.load(shard_path, map_location='cpu')
+                shard = torch.load(shard_path, map_location='cpu', weights_only=False)
                 fsdp_model.load_state_dict(shard)
                 del shard
                 gc.collect()
@@ -1047,7 +1047,7 @@ def main():
             optim_shard_path = os.path.join(args.output_dir, path, f'optim_shard_rank{accelerator.process_index}.pt')
             raw_optimizer = getattr(optimizer, 'optimizer', optimizer)
             if os.path.isfile(optim_shard_path):
-                optim_shard = torch.load(optim_shard_path, map_location='cpu')
+                optim_shard = torch.load(optim_shard_path, map_location='cpu', weights_only=False)
                 optim_state = FSDP.optim_state_dict_to_load(model, raw_optimizer, optim_shard)
                 raw_optimizer.load_state_dict(optim_state)
                 del optim_shard, optim_state
